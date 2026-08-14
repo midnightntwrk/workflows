@@ -1,0 +1,43 @@
+name: Default labels on issue open (reusable)
+
+# Reusable workflow: stamp `status:untriaged` on an issue if no `status:*` label
+# is already present. Defense-in-depth for issues created outside the templates
+# (REST API, gh CLI, "Open a blank issue" link, Projects v2 quick-add, mobile
+# app, transferred issues). Templates already set `status:untriaged` via their
+# `labels:` frontmatter, so this is a no-op for the template path.
+#
+# Consumer dispatcher (see README.md) declares `on: issues: [opened]` and
+# `permissions: { issues: write }`, then calls this workflow via `uses:`. The
+# consumer's permissions block is the ceiling — this workflow cannot escalate.
+
+on:
+  workflow_call:
+
+jobs:
+  apply:
+    name: Stamp status:untriaged if no status label present
+    runs-on: ubuntu-24.04
+    # We deliberately do NOT redeclare `permissions:` here. Reusable workflows
+    # inherit the consumer's permissions block, which is what we want — the
+    # consumer is the boundary for "what can this workflow do in my repo".
+    steps:
+      - name: Stamp default labels
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const labels = (context.payload.issue.labels || [])
+              .map(l => (typeof l === 'string' ? l : l.name))
+              .filter(Boolean);
+
+            if (labels.some(n => n.startsWith('status:'))) {
+              core.info(`Issue #${context.payload.issue.number} already has a status:* label; skipping.`);
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: ['status:untriaged'],
+            });
+            core.info(`Stamped status:untriaged on #${context.payload.issue.number}.`);

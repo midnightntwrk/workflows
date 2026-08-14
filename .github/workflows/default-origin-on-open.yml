@@ -1,0 +1,52 @@
+name: Default Origin on issue open (reusable)
+
+# Reusable: set the native "Origin" issue field to a default (Public) on a new
+# issue when it is not already set. Add-only via POST (never overwrites an
+# existing Origin value, and never touches other fields like Priority/Severity).
+#
+# Consumer dispatcher declares `on: issues: [opened]` and
+# `permissions: { issues: write }`, then calls this via `uses:`.
+
+on:
+  workflow_call:
+    inputs:
+      field_id:
+        description: Org "Origin" issue-field id (default = midnightntwrk Origin)
+        type: number
+        default: 43353846
+      default_value:
+        description: Option name to set when Origin is empty
+        type: string
+        default: Public
+
+jobs:
+  apply:
+    name: Set Origin default if unset
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Set Origin default
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          FIELD_ID: ${{ inputs.field_id }}
+          DEFAULT_VALUE: ${{ inputs.default_value }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            const fieldId = Number(process.env.FIELD_ID);
+            const value = process.env.DEFAULT_VALUE;
+
+            const cur = await github.request(
+              'GET /repos/{owner}/{repo}/issues/{issue_number}/issue-field-values',
+              { owner, repo, issue_number },
+            );
+            if ((cur.data || []).some(v => v.issue_field_id === fieldId)) {
+              core.info(`#${issue_number} already has the Origin field set; skipping.`);
+              return;
+            }
+
+            await github.request(
+              'POST /repos/{owner}/{repo}/issues/{issue_number}/issue-field-values',
+              { owner, repo, issue_number, issue_field_values: [{ field_id: fieldId, value }] },
+            );
+            core.info(`Set Origin=${value} on #${issue_number}.`);
