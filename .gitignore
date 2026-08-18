@@ -1,0 +1,4 @@
+# Local tooling and editor droppings
+.DS_Store
+*.log
+.envrc.local

@@ -1,0 +1,68 @@
+name: Label AI-assisted PRs (reusable)
+
+# Reusable workflow: auto-apply the `bot:ai-assisted` label to any PR whose
+# commits or body carry an AI-tooling signature (a Co-authored-by trailer or a
+# "Generated with ..." footer). Mechanical backstop for the AI Assistance
+# Disclosure rule (shieldedtech/agent-rules) so disclosure does not depend on the
+# author remembering.
+#
+# Uses `pull_request` (via the consumer dispatcher), matching the other pr-*
+# reusables here: the SRE fleet works from in-repo branches, so the token has
+# write access. Fork PRs would not be labeled — revisit if external forks
+# become common.
+#
+# Does NOT create the label: labels are IaC-managed (canonical set on both orgs),
+# so if a repo somehow lacks `bot:ai-assisted` this logs and skips rather than
+# auto-creating it. The consumer dispatcher supplies `contents: read` +
+# `pull-requests: write`; this reusable inherits the consumer's permissions.
+
+on:
+  workflow_call:
+
+jobs:
+  label:
+    name: Apply bot:ai-assisted when an AI signature is present
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Detect AI signature and label
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const LABEL = 'bot:ai-assisted';
+            const AI = /(co-authored-by:.*(claude|anthropic\.com|codex|openai|copilot|cursor|gemini|gpt-[0-9]))|(generated (with|by) .*(claude|codex|copilot))|🤖 generated (with|by)/i;
+
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            if (!pr) { core.info('No pull_request in context; nothing to do.'); return; }
+            const number = pr.number;
+
+            // Already labeled -> nothing to do.
+            const current = (pr.labels || []).map(l => (typeof l === 'string' ? l : l.name));
+            if (current.includes(LABEL)) { core.info(`#${number} already has ${LABEL}.`); return; }
+
+            // Signal: PR body + every commit message on the PR.
+            let blob = pr.body || '';
+            try {
+              const commits = await github.paginate(github.rest.pulls.listCommits, {
+                owner, repo, pull_number: number, per_page: 100,
+              });
+              blob += '\n' + commits.map(c => c.commit.message).join('\n');
+            } catch (e) {
+              core.warning(`listCommits failed: ${e.message}`);
+            }
+
+            if (!AI.test(blob)) { core.info(`#${number}: no AI signature; nothing to do.`); return; }
+
+            // Do NOT auto-create the label if it is absent — labels are
+            // IaC-managed; only apply when it already exists.
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: LABEL });
+            } catch (e) {
+              core.warning(`${LABEL} not present on ${owner}/${repo}; not creating it. Surface as a follow-up to standardize the label.`);
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: number, labels: [LABEL],
+            });
+            core.info(`Applied ${LABEL} to #${number} (AI signature detected).`);

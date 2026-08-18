@@ -1,0 +1,166 @@
+name: PR merged → set linked issue In Review (reusable)
+
+# Reusable workflow: when a PR closes via merge and its title, body, or branch
+# name references an issue, set that issue's status to "In Review" on the
+# target board. Pairs with pr-set-issue-in-progress.yml.
+#
+# Consumer dispatcher triggers on `pull_request: [closed]` and gates with
+# `if: github.event.pull_request.merged == true` so close-without-merge is
+# ignored.
+
+on:
+  workflow_call:
+    inputs:
+      project_number:
+        description: GitHub Projects v2 project number
+        required: false
+        default: 50
+        type: number
+      project_owner:
+        description: Org login that owns the project
+        required: false
+        default: midnightntwrk
+        type: string
+    secrets:
+      PROJECT_TOKEN:
+        description: PAT with `project` scope, or App installation token with Projects write
+        required: false
+
+jobs:
+  set-in-review:
+    name: Set referenced issues to In Review on board
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Set referenced issues to In Review on board
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          ORG: ${{ inputs.project_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PROJECT_NUMBER: ${{ inputs.project_number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -e
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::warning:: PROJECT_TOKEN secret not set. Skipping."
+            exit 0
+          fi
+
+          TEXT=$(printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY")
+
+          EXPLICIT_REFS=$({
+            printf '%s\n' "$TEXT" \
+              | grep -oE '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+' \
+              | sed -E 's#^([^/]+)/([^#]+)#([0-9]+)$#\1 \2 \3#'
+            printf '%s\n' "$TEXT" \
+              | grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+' \
+              | sed -E 's#https://github\.com/([^/]+)/([^/]+)/issues/([0-9]+)#\1 \2 \3#'
+          } | sort -u) || true
+
+          LOCAL_TEXT=$(printf '%s\n' "$TEXT" \
+            | sed -E 's#[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+##g' \
+            | sed -E 's#https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+##g')
+
+          LOCAL_REFS=$({
+            printf '%s\n' "$LOCAL_TEXT" \
+              | grep -oE '#[0-9]+' \
+              | sed -E "s#^#${ORG} ${REPO} #; s/#//"
+            echo "$BRANCH" \
+              | grep -oE '(^|/)[0-9]+' \
+              | grep -oE '[0-9]+' \
+              | sed -E "s#^#${ORG} ${REPO} #"
+          } | sort -u) || true
+
+          ISSUE_REFS=$({ printf '%s\n' "$EXPLICIT_REFS"; printf '%s\n' "$LOCAL_REFS"; } | sed '/^$/d' | sort -u) || true
+          if [[ -z "$ISSUE_REFS" ]]; then
+            echo "No issue references found in title, body, or branch. Skipping."
+            exit 0
+          fi
+          echo "Issue references:"
+          echo "$ISSUE_REFS"
+
+          QUERY='query($org: String!, $number: Int!) {
+            organization(login: $org) {
+              projectV2(number: $number) {
+                id
+                fields(first: 20) {
+                  nodes {
+                    ... on ProjectV2SingleSelectField {
+                      id
+                      name
+                      options { id name }
+                    }
+                  }
+                }
+              }
+            }
+          }'
+          RESULT=$(gh api graphql -f query="$QUERY" -f org="$ORG" -F number=$PROJECT_NUMBER 2>&1) || true
+          PROJECT_ID=$(echo "$RESULT" | jq -r '.data.organization.projectV2.id // empty' 2>/dev/null || true)
+          if [[ -z "$PROJECT_ID" ]]; then
+            echo "::warning:: Could not get project $ORG #$PROJECT_NUMBER."
+            exit 0
+          fi
+          STATUS_FIELD_ID=$(echo "$RESULT" | jq -r '.data.organization.projectV2.fields.nodes[]? | select(.name == "Status") | .id' 2>/dev/null || true)
+          IN_REVIEW_OPTION_ID=$(echo "$RESULT" | jq -r '.data.organization.projectV2.fields.nodes[]? | select(.name == "Status") | .options[]? | select(.name == "In Review") | .id' 2>/dev/null || true)
+          if [[ -z "$STATUS_FIELD_ID" || -z "$IN_REVIEW_OPTION_ID" ]]; then
+            echo "::warning:: Status field or 'In Review' option not found on project."
+            exit 0
+          fi
+
+          while read -r ISSUE_OWNER ISSUE_REPO NUM; do
+            [[ -z "$ISSUE_OWNER" || -z "$ISSUE_REPO" || -z "$NUM" ]] && continue
+
+            ISSUE_QUERY='query($owner: String!, $repo: String!, $num: Int!) {
+              repository(owner: $owner, name: $repo) {
+                issue(number: $num) { id }
+              }
+            }'
+            ISSUE_RESULT=$(gh api graphql -f query="$ISSUE_QUERY" -f owner="$ISSUE_OWNER" -f repo="$ISSUE_REPO" -F num="$NUM" 2>&1) || true
+            ISSUE_NODE_ID=$(echo "$ISSUE_RESULT" | jq -r '.data.repository.issue.id // empty' 2>/dev/null || true)
+            if [[ -z "$ISSUE_NODE_ID" ]]; then
+              echo "Issue $ISSUE_OWNER/$ISSUE_REPO#$NUM not found or not an issue, skipping."
+              continue
+            fi
+
+            ITEM_QUERY='query($nodeId: ID!, $projectNum: Int!, $org: String!) {
+              node(id: $nodeId) {
+                ... on Issue {
+                  projectItems(first: 20) {
+                    nodes {
+                      id
+                      project { number }
+                    }
+                  }
+                }
+              }
+            }'
+            ITEM_RESULT=$(gh api graphql -f query="$ITEM_QUERY" -f nodeId="$ISSUE_NODE_ID" -F projectNum=$PROJECT_NUMBER -f org="$ORG" 2>&1) || true
+            ITEM_ID=$(echo "$ITEM_RESULT" | jq -r --arg pn "$PROJECT_NUMBER" '.data.node.projectItems.nodes[]? | select(.project.number == ($pn | tonumber)) | .id' 2>/dev/null | head -1 || true)
+            if [[ -z "$ITEM_ID" ]]; then
+              echo "Issue $ISSUE_OWNER/$ISSUE_REPO#$NUM is not on project #$PROJECT_NUMBER, skipping."
+              continue
+            fi
+
+            UPDATE_MUTATION='mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId
+                itemId: $itemId
+                fieldId: $fieldId
+                value: { singleSelectOptionId: $optionId }
+              }) { projectV2Item { id } }
+            }'
+            UPDATE_OUTPUT=$(gh api graphql -f query="$UPDATE_MUTATION" \
+              -f projectId="$PROJECT_ID" -f itemId="$ITEM_ID" \
+              -f fieldId="$STATUS_FIELD_ID" -f optionId="$IN_REVIEW_OPTION_ID" 2>&1) || true
+            UPDATE_ERR=$(echo "$UPDATE_OUTPUT" | jq -r '.errors[0].message // empty' 2>/dev/null || true)
+            if [[ -n "$UPDATE_ERR" ]]; then
+              echo "::warning:: Could not set $ISSUE_OWNER/$ISSUE_REPO#$NUM to In Review: $UPDATE_ERR"
+            else
+              echo "Set issue $ISSUE_OWNER/$ISSUE_REPO#$NUM to In Review on project $ORG #$PROJECT_NUMBER."
+            fi
+          done <<< "$ISSUE_REFS"

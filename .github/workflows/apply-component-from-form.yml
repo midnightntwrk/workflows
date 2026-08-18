@@ -1,0 +1,97 @@
+name: Apply component labels from form (reusable)
+
+# Reusable workflow: when an issue body contains the standard form-rendered
+# section `### Components` followed by one or more canonical `component:*`
+# answers (rendered on a single line, comma+space separated), ADD any
+# allowlisted components that are not already on the issue.
+#
+# ADD-ONLY, unlike apply-priority-from-form: components are multi-value, so we
+# never remove existing `component:*` labels (a later triager may have added
+# some), an empty / `_No response_` answer is a no-op (not a wipe), and we only
+# ever touch `component:*` labels. Idempotent.
+#
+# Consumer dispatcher triggers on `issues: [opened, edited]` and supplies the
+# `issues: write` permission ceiling.
+
+on:
+  workflow_call:
+
+jobs:
+  apply:
+    name: Apply component labels from form dropdown
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Read form answer and add component labels
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            // Normalize CRLF -> LF: GitHub delivers issue.body with \r\n in
+            // webhook payloads, which would otherwise break heading matching.
+            const body = (context.payload.issue.body || '').replace(/\r\n/g, '\n');
+            // Canonical allowlist of component:* labels (hardcoded to match the
+            // issue-form dropdown options).
+            const valid = new Set([
+              'component:bridge',
+              'component:cardano-db-sync',
+              'component:cardano-node',
+              'component:charts',
+              'component:cli-wallet',
+              'component:compact-compiler',
+              'component:compact-runtime',
+              'component:contracts',
+              'component:crypto',
+              'component:dapp-connector',
+              'component:dust-app',
+              'component:explorer',
+              'component:faucet',
+              'component:glacier-drop',
+              'component:indexer',
+              'component:ledger',
+              'component:midnight-js',
+              'component:midnight-node',
+              'component:midnight-toolkit',
+              'component:partner-chains',
+              'component:proof-server',
+              'component:wallet',
+              'component:wallet-sdk',
+              'component:zk',
+              'component:zkir',
+            ]);
+            // Issue forms render a multi-select dropdown like:
+            //   ### Components
+            //
+            //   component:wallet, component:indexer
+            // Match any ATX heading level (#..######) so non-form issues
+            // (API / gh / agent) that use `## Components` are also captured.
+            const section = body.match(/^#{1,6}[ \t]+Components[ \t]*\n+(?<value>[\s\S]*?)(?=\n#{1,6}[ \t]|\s*$)/m);
+            if (!section || !section.groups) {
+              core.info('No Components section found in issue body.');
+              return;
+            }
+            const raw = section.groups.value.trim();
+            if (!raw || raw === '_No response_') {
+              core.info('Components answer is empty (_No response_); nothing to do.');
+              return;
+            }
+            // Defensively pull every component:* token from the block; tolerate
+            // stray whitespace / commas. Intersect with the allowlist.
+            const tokens = raw.match(/component:[a-z0-9-]+/g) || [];
+            const chosen = [...new Set(tokens)].filter(t => valid.has(t));
+            if (chosen.length === 0) {
+              core.info('No canonical component labels in Components answer; nothing to do.');
+              return;
+            }
+            const current = (context.payload.issue.labels || []).map(l => l.name);
+            // ADD-ONLY: never remove existing component:* labels.
+            const toAdd = chosen.filter(c => !current.includes(c));
+            if (toAdd.length === 0) {
+              core.info(`Already labeled with all chosen components (${chosen.join(', ')}); nothing to do.`);
+              return;
+            }
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: toAdd,
+            });
+            core.info(`Added ${toAdd.join(', ')}`);
