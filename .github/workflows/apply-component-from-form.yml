@@ -28,8 +28,8 @@ jobs:
             // Normalize CRLF -> LF: GitHub delivers issue.body with \r\n in
             // webhook payloads, which would otherwise break heading matching.
             const body = (context.payload.issue.body || '').replace(/\r\n/g, '\n');
-            // Canonical allowlist of component:* labels (hardcoded to match the
-            // issue-form dropdown options).
+            // Canonical allowlist of component:* labels; mirrors the closed set
+            // that our label IaC provisions on consumer repos.
             const valid = new Set([
               'component:bridge',
               'component:cardano-db-sync',
@@ -37,6 +37,7 @@ jobs:
               'component:charts',
               'component:cli-wallet',
               'component:compact-compiler',
+              'component:compact-js',
               'component:compact-runtime',
               'component:contracts',
               'component:crypto',
@@ -49,6 +50,7 @@ jobs:
               'component:ledger',
               'component:midnight-js',
               'component:midnight-node',
+              'component:midnight-sdk',
               'component:midnight-toolkit',
               'component:partner-chains',
               'component:proof-server',
