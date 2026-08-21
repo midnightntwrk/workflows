@@ -138,6 +138,9 @@ jobs:
                     nodes {
                       id
                       project { number }
+                      fieldValueByName(name: "Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue { name }
+                      }
                     }
                   }
                 }
@@ -149,6 +152,21 @@ jobs:
               echo "Issue $ISSUE_OWNER/$ISSUE_REPO#$NUM is not on project #$PROJECT_NUMBER, skipping."
               continue
             fi
+
+            # Never DOWNGRADE a human-set status: only move to In Progress from
+            # an "early" state (no status / Todo / Backlog). A card already in
+            # Ready for QA / In Review / Done etc. stays where a human put it.
+            CURRENT_STATUS=$(echo "$ITEM_RESULT" | jq -r --arg pn "$PROJECT_NUMBER" '.data.node.projectItems.nodes[]? | select(.project.number == ($pn | tonumber)) | .fieldValueByName.name // empty' 2>/dev/null | head -1 || true)
+            case "$CURRENT_STATUS" in
+              ""|"Todo"|"To Do"|"Backlog"|"No Status")
+                : ;; # eligible - proceed
+              "In Progress")
+                echo "Issue $ISSUE_OWNER/$ISSUE_REPO#$NUM already In Progress, skipping."
+                continue ;;
+              *)
+                echo "Issue $ISSUE_OWNER/$ISSUE_REPO#$NUM is '$CURRENT_STATUS' (past In Progress) - not downgrading, skipping."
+                continue ;;
+            esac
 
             # Set status to In Progress
             UPDATE_MUTATION='mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
